@@ -6,56 +6,32 @@
 #include <trusty_std.h>
 #include <trusty_ipc.h>
 #include <lib/storage/storage.h>
+#include <errno.h>
 #include "test_log.h"
+#include "trusty_test.h"
 
 #define TEST_PORT "com.sprd.trusty.trusty_test"
-#define TEST_MAX_BUFFER_LENGTH 4096
+//#define KEYMASTER_PORT "com.android.trusty.keymaster"
+#define KEYMASTER_SECURE_PORT "com.android.trusty.keymaster.secure"
+#define MAX_BUF_SIZE 4096
+#define DEFAULT_BUF_SIZE 1024 
 
 #define KEY_PUB_DCP_ID "key_pub_dcp"
 #define LC128_ID "lc128"
 #define SRM_ID "hdcp_srm_msg"
 #define KM_ID "km_store"
 
-enum {
-    TYPE_KM,
-    TYPE_KPUB_DCP,
-    TYPE_LC128,
-    TYPE_SRM,
-    TYPE_CERTRX
-};
-
-enum {
-    TEST_REQ_SHIFT = 1,
-    TEST_RESP_BIT = 1,
-
-    WRITE_TO_STORAGE_SELF = 23,
-    READ_FROM_STORAGE_SELF = 24,
-    WRITE_TO_STORAGE_OTHER = 25,
-    READ_FROM_STORAGE_OTHER = 26,
-    REMOVE_DATA = 27
-};
-
-/**
- * test_message - Serial header for communicating with ta server
- * @cmd: the command, one of xx, xx. Payload must be a serialized
- *       buffer of the corresponding request object.
- * @payload: start of the serialized command specific payload
- */
-typedef struct _test_message {
-    uint32_t cmd;
-    uint8_t payload[0];
-} test_message ;
-
-int trusty_opreate_self(int cmd, uint8_t *in_buf, uint32_t in_buf_size, uint8_t *out_buf, uint32_t *out_buf_size);
-int trusty_opreate_other(int cmd, uint8_t *in_buf, uint32_t in_buf_size, uint8_t *out_buf, uint32_t *out_buf_size);
-int trusty_remove_data(int cmd, uint8_t *in_buf, uint32_t in_buf_size, uint8_t *out_buf, uint32_t *out_buf_size);
+static int open_km_session(void);
+static int call_km_command(uint32_t cmd, void *in, uint32_t in_size, uint8_t **out,
+        uint32_t *out_size);
+static void close_km_session(void);
 
 static long test_ipc_init(void) {
     int rc;
     LOGI("test_ipc_init()...\n");
 
     /* Initialize secure service , other TA will use this */
-    rc = port_create(TEST_PORT, 1, TEST_MAX_BUFFER_LENGTH,
+    rc = port_create(TEST_PORT, 1, MAX_BUF_SIZE,
             IPC_PORT_ALLOW_NS_CONNECT);
     if (rc < 0) {
         LOGE("Failed (%d) to create port %s\n", rc, TEST_PORT);
@@ -110,9 +86,8 @@ static int handle_request(uint32_t cmd, uint8_t *in_buf, uint32_t in_buf_size,
 static long handle_msg(handle_t chan) {
     /* get message info */
     ipc_msg_info_t msg_info;
-    uint8_t *out_buf;//out_buf[600];
+    uint8_t *msg_buf, *out_buf;
     uint32_t out_buf_size = 0;
-    uint8_t *msg_buf;
     
     long rc = get_msg(chan, &msg_info);
     /* no new messages */
@@ -151,7 +126,7 @@ static long handle_msg(handle_t chan) {
     /* get request command */
     test_message *test_msg = (test_message *)(msg_buf);
     // malloc for out buf
-    out_buf = (uint8_t *)malloc(3072+64);
+    out_buf = (uint8_t *) malloc(DEFAULT_BUF_SIZE);
     if (NULL == out_buf) {
         LOGE("test ipc, malloc for out_buf error!\n");
     }
@@ -163,7 +138,6 @@ static long handle_msg(handle_t chan) {
         return -1;
     }
 
-    LOGI("before send_response(cmd: %d)...size=%d\n", test_msg->cmd, out_buf_size);
     rc = send_response(chan, test_msg->cmd, out_buf, out_buf_size);
     if (rc < 0) {
         LOGE("unable (%ld) to send response\n", rc);
@@ -264,6 +238,15 @@ int main(void) {
         }
     }
 
+    return 0;
+}
+
+
+int add_param(uint8_t *buf, int offset, void *arg, size_t len)
+{
+    memcpy(buf+offset, &len, sizeof(size_t));
+    offset += sizeof(size_t);
+    memcpy(buf+offset, arg, len);
     return 0;
 }
 
@@ -424,14 +407,6 @@ int remove_all_data(void)
     return 0;
 }
 
-int add_param(uint8_t *buf, int offset, void *arg, size_t len)
-{
-    memcpy(buf+offset, &len, sizeof(size_t));
-    offset += sizeof(size_t);
-    memcpy(buf+offset, arg, len);
-    return 0;
-}
-
 int trusty_remove_data(int cmd, uint8_t *in_buf, uint32_t in_buf_size, uint8_t *out_buf,
         uint32_t *out_buf_size)
 {
@@ -448,15 +423,13 @@ int trusty_opreate_self(int cmd, uint8_t *in_buf, uint32_t in_buf_size, uint8_t 
         uint32_t *out_buf_size)
 {
     int ret;
-    int len;
-    uint8_t buf[1024];
-    int offset = 0;
-
-    len = *(int*) in_buf;
-    offset += sizeof(int);
-    LOGD("trusty_opreate_self: len=%d, offset=%d\n", len, offset);
+    uint8_t buf[DEFAULT_BUF_SIZE];
+    int len = 0, offset = 0;
 
     if (cmd == WRITE_TO_STORAGE_SELF) {
+        len = *(int*) in_buf;
+        offset += sizeof(int);
+        LOGD("trusty_opreate_self Write: len=%d, offset=%d\n", len, offset);
         memcpy(buf, in_buf + offset, len);
         ret = write_to_storage(buf, len, TYPE_SRM); // use SRM file for test
     } else if (cmd == READ_FROM_STORAGE_SELF) {
@@ -478,8 +451,239 @@ int trusty_opreate_self(int cmd, uint8_t *in_buf, uint32_t in_buf_size, uint8_t 
     return 0;
 }
 
-int trusty_opreate_other(int cmd, uint8_t *in_buf, uint32_t in_buf_size, uint8_t *out_buf,
-        uint32_t *out_buf_size)
+int trusty_opreate_other(int cmd, uint8_t *in_buf, uint32_t in_buf_size,
+        uint8_t *out_buf, uint32_t *out_buf_size)
 {
-    return 0;
+    int ret;
+    int size, offset = 0;
+    uint32_t buf_size = DEFAULT_BUF_SIZE;
+    uint8_t *buf, *in_ptr;
+
+    size = *(int*) in_buf;
+    offset += sizeof(int);
+    in_ptr = in_buf + offset;
+    LOGD("trusty_opreate_other: size=%d, offset=%d\n", size, offset);
+
+    if (open_km_session() < 0) {
+        LOGE("open km session failed!");
+        return -1;
+    }
+    ret = call_km_command(cmd, in_ptr, size, &buf, &buf_size);
+    if (ret < 0) {
+        LOGE("call keymaster command(%d) failed!", cmd);
+        close_km_session();
+        return -1;
+    }
+    close_km_session();
+
+    // feedback the response
+    offset = 0;
+    if (cmd == WRITE_TO_STORAGE_OTHER) {
+        add_param(out_buf, 0, &ret, sizeof(int));
+        offset += 2*sizeof(int);
+    } else if (cmd == READ_FROM_STORAGE_OTHER) {
+        add_param(out_buf, 0, buf, ret);
+        offset += sizeof(int) + ret;
+    }
+    *out_buf_size = offset;
+    
+    return NO_ERROR;
+}
+
+
+/*********************************************************************/
+// below used to access data from other TAs
+static handle_t km_handle_;
+
+static long send_req(handle_t handle, uint32_t cmd, uint8_t *data, uint32_t size)
+{
+    LOGD("send_req(cmd: %d, size: %d)", cmd, size);
+    iovec_t *tx_iov;
+    ipc_msg_t tx_msg;
+    long rc;
+    km_message msg = {
+        .cmd = cmd,
+    };
+
+    if (0 == handle) {
+        LOGE("keymaster TA not connected.\n");
+        return -EINVAL;
+    }
+
+    if (data != NULL && size > 0) {
+        tx_iov = malloc(2 * sizeof(iovec_t));
+        if (tx_iov == NULL) {
+            goto MALLOC_FAIL;
+        }
+        tx_iov[0].base = &msg;
+        tx_iov[0].len = sizeof(msg);
+        tx_iov[1].base = data;
+        tx_iov[1].len = size;
+        tx_msg.iov = tx_iov;
+        tx_msg.num_iov = 2;
+        tx_msg.num_handles = 0;
+        tx_msg.handles = NULL;
+    } else {
+        tx_iov = malloc(sizeof(iovec_t));
+        if (tx_iov == NULL) {
+            goto MALLOC_FAIL;
+        }
+        tx_iov->base = &msg;
+        tx_iov->len = sizeof(msg);
+        tx_msg.iov = tx_iov;
+        tx_msg.num_iov = 1;
+        tx_msg.num_handles = 0;
+        tx_msg.handles = NULL;
+    }
+    rc = send_msg(km_handle_, &tx_msg);
+    if (rc < 0) {
+        LOGE("%s: failed (%ld) to send_msg\n", __func__, rc);
+        return rc;
+    }
+
+    free(tx_iov);
+    LOGD("send_req() exit...");
+    return NO_ERROR;
+
+MALLOC_FAIL:
+    LOGE("%s: out of memory (%d)\n", __func__, __LINE__);
+    return -1;
+}
+
+static long await_response(handle_t handle, struct ipc_msg_info *inf)
+{
+    LOGD("await_response() enter...");
+    uevent_t uevt;
+
+    if (0 == handle) {
+        LOGE("keymaster TA not connected.\n");
+        return -EINVAL;
+    }
+
+    long rc = wait(handle, &uevt, -1);
+    if (rc != NO_ERROR) {
+        LOGE("interrupted waiting for response (%ld)\n", rc);
+        return rc;
+    }
+
+    rc = get_msg(handle, inf);
+    if (rc != NO_ERROR) {
+        LOGE("failed to get_msg (%ld)\n", rc);
+    }
+    LOGD("await_response() exit...");
+    return rc;
+}
+
+static long read_response(handle_t handle, uint32_t msg_id,
+        uint32_t cmd, uint8_t *buf, uint32_t size)
+{
+    LOGD("read_response() enter...");
+    km_message msg;
+
+    if (0 == handle) {
+        LOGE("keymaster TA not connected.\n");
+        return -EINVAL;
+    }
+
+    iovec_t rx_iov[2] = {
+        {
+            .base = &msg,
+            .len = sizeof(msg)
+        },
+        {
+            .base = buf,
+            .len = size
+        }
+    };
+    struct ipc_msg rx_msg = {
+        .iov = rx_iov,
+        .num_iov = 2,
+    };
+
+    long rc = read_msg(handle, msg_id, 0, &rx_msg);
+    put_msg(handle, msg_id);
+    if (msg.cmd != (cmd | TEST_RESP_BIT)) {
+        LOGE("%s: invalid response (0x%x) for cmd (0x%x)\n",
+                __func__, msg.cmd, cmd);
+        return ERR_NOT_VALID;
+    }
+    
+    LOGD("read_response() exit..");
+    return rc;
+}
+
+static int open_km_session(void)
+{
+    LOGD("open_km_session() enter...");
+
+    long rc = connect(KEYMASTER_SECURE_PORT, IPC_CONNECT_WAIT_FOR_PORT);
+    if (rc < 0) {
+        LOGD("open keymaster TA session FAIL(%ld)!...", rc);
+        return rc;
+    }
+
+    km_handle_ = rc;
+    LOGD("open_km_session() exit... km_handle_=%d", km_handle_);
+    return NO_ERROR;
+}
+
+static void close_km_session(void)
+{
+    LOGD("close_km_session() enter...");
+    close(km_handle_);
+    LOGD("close_km_session() exit...");
+}
+
+static int call_km_command(uint32_t cmd, void *in, uint32_t in_size, uint8_t **out_p,
+        uint32_t *out_size_p)
+{
+    long rc; 
+    ipc_msg_info_t info;
+    LOGD("call_km_command() enter...");
+    
+    rc = send_req(km_handle_, cmd, in, in_size);
+    if (rc < 0) {
+        LOGE("%s: failed (%ld) to send req\n", __func__, rc);
+        return rc;
+    }
+    rc = await_response(km_handle_, &info);
+    if (rc < 0) {
+        LOGE("%s: failed (%ld) to await response\n", __func__, rc);
+        return rc;
+    }
+    if (info.len <= sizeof(km_message)) {
+        LOGE("%s: invalid response len (%zu)\n", __func__, info.len);
+        put_msg(km_handle_, info.id);
+        return ERR_NOT_FOUND;
+    }
+
+    size_t size = info.len - sizeof(km_message);
+    uint8_t *resp_buf = malloc(size);
+    if (resp_buf == NULL) {
+        LOGE("%s: out of memory (%zu)\n", __func__, info.len);
+        put_msg(km_handle_, info.id);
+        return ERR_NO_MEMORY;
+    }
+    rc = read_response(km_handle_, info.id, cmd,
+            resp_buf, size);
+    if (rc < 0) {
+        goto err_bad_read;
+    }
+    if ((size_t)rc != info.len) {
+        // data read in does not match message length
+        LOGE("%s: invalid read length: (%ld != %zu)\n",
+                __func__, rc, info.len);
+        rc = ERR_IO;
+        goto err_bad_read;
+    }
+
+    *out_size_p = size;
+    *out_p = resp_buf;
+    LOGD("call_km_command() exit...");
+    return NO_ERROR;
+
+err_bad_read:
+    free(resp_buf);
+    LOGE("%s: failed read_msg (%ld)", __func__, rc);
+    return rc;
 }

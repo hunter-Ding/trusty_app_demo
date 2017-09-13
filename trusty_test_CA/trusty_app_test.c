@@ -32,15 +32,15 @@
 #define LOG_TAG "TRUSTY_TEST"
 
 enum test_command {
-    TA_REQ_SHIFT = 1,
-    TA_RESP_BIT  = 1,
+    TEST_REQ_SHIFT = 1,
+    TEST_RESP_BIT  = 1,
 
-    TEST_FIRST = (0 << TA_REQ_SHIFT),
-    WRITE_TO_STORAGE_SELF = 23,
-    READ_FROM_STORAGE_SELF = 24,
-    WRITE_TO_STORAGE_OTHER = 25,
-    READ_FROM_STORAGE_OTHER = 26,
-    REMOVE_DATAS = 27
+    TEST_FIRST                  = (0 << TEST_REQ_SHIFT),
+    WRITE_TO_STORAGE_SELF       = (23 << TEST_REQ_SHIFT),
+    READ_FROM_STORAGE_SELF      = (24 << TEST_REQ_SHIFT),
+    WRITE_TO_STORAGE_OTHER      = (25 << TEST_REQ_SHIFT),
+    READ_FROM_STORAGE_OTHER     = (26 << TEST_REQ_SHIFT),
+    REMOVE_DATAS                = (27 << TEST_REQ_SHIFT),
 };
 
 typedef enum dest {
@@ -115,7 +115,7 @@ int trusty_test_call(uint32_t cmd, void *in, uint32_t in_size, uint8_t **out,
         return -EINVAL;
     }
 
-    if ((cmd | TA_RESP_BIT) != msg->cmd) {
+    if ((cmd | TEST_RESP_BIT) != msg->cmd) {
         ALOGE("invalid command (%d)\n", msg->cmd);
         return -EINVAL;
     }
